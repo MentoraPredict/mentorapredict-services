@@ -1,0 +1,165 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [dev, qa, main]
+  workflow_dispatch:
+    inputs:
+      servicio:
+        description: Nombre del servicio o ALL-SERVICES (excluye sample-service)
+        required: true
+        type: string
+        default: ALL-SERVICES
+  workflow_call:
+    inputs:
+      servicio:
+        description: Nombre del servicio o ALL-SERVICES (excluye sample-service)
+        required: false
+        type: string
+        default: ALL-SERVICES
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}-${{ inputs.servicio || 'auto' }}
+  cancel-in-progress: true
+
+jobs:
+  cambios:
+    name: Detectar cambios
+    runs-on: ubuntu-latest
+    outputs:
+      proyectos: ${{ steps.detectar.outputs.proyectos }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: detectar
+        name: Seleccionar proyectos afectados
+        env:
+          EVENTO: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          SERVICIO: ${{ inputs.servicio }}
+        run: python3 .github/scripts/detect-ci-changes.py >> "$GITHUB_OUTPUT"
+
+  pruebas:
+    name: Pruebas (${{ matrix.proyecto }})
+    needs: cambios
+    if: >-
+      needs.cambios.outputs.proyectos != '[]' &&
+      (github.event_name != 'pull_request' || github.base_ref != 'dev')
+    strategy:
+      fail-fast: false
+      matrix:
+        proyecto: ${{ fromJSON(needs.cambios.outputs.proyectos) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4.4.3
+      - name: Compilar y ejecutar pruebas
+        env:
+          PROYECTO: ${{ matrix.proyecto }}
+        run: |
+          if [ "$PROYECTO" = ALL-SERVICES ]; then
+            ./gradlew build integrationTest --no-daemon \
+              -x :services:sample-service:build \
+              -x :services:sample-service:integrationTest
+          else
+            ./gradlew ":services:$PROYECTO:build" ":services:$PROYECTO:integrationTest" --no-daemon
+          fi
+      - name: Guardar reportes si falla el trabajo
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: reportes-ci-${{ matrix.proyecto }}
+          path: |
+            **/build/reports/**
+            **/build/test-results/**
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Resumir el resultado del proyecto
+        if: always()
+        env:
+          PROYECTO: ${{ matrix.proyecto }}
+          ESTADO: ${{ job.status }}
+        run: |
+          {
+            echo '## Resultado de pruebas'
+            printf -- '- Proyecto: `%s`\n' "$PROYECTO"
+            printf -- '- Resultado: `%s`\n' "$ESTADO"
+            echo '- Los reportes disponibles se guardan como artefacto si el trabajo falla.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  secretos:
+    name: Escaneo de secretos
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Comprobar que los controles bloquean
+        run: python3 .github/scripts/scan-security.py selftest
+      - name: Buscar secretos en el repositorio
+        run: python3 .github/scripts/scan-security.py repo --reports "$RUNNER_TEMP/reportes-secretos"
+      - name: Guardar el reporte de secretos
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: reporte-secretos-${{ inputs.servicio || 'auto' }}
+          path: ${{ runner.temp }}/reportes-secretos
+          if-no-files-found: warn
+          retention-days: 7
+
+  resultado:
+    name: Resultado de CI
+    if: always()
+    needs: [cambios, pruebas, secretos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resumir los proyectos seleccionados
+        env:
+          PROYECTOS: ${{ needs.cambios.outputs.proyectos }}
+          CAMBIOS: ${{ needs.cambios.result }}
+          PRUEBAS: ${{ needs.pruebas.result }}
+          SECRETOS: ${{ needs.secretos.result }}
+          EVENTO: ${{ github.event_name }}
+          RAMA_BASE: ${{ github.base_ref }}
+        run: |
+          {
+            echo '## Resumen de CI'
+            printf -- '- Proyectos seleccionados: `%s`\n' "${PROYECTOS:-no disponibles}"
+            printf -- '- Detección de cambios: `%s`\n' "$CAMBIOS"
+            printf -- '- Resultado global de pruebas: `%s`\n' "$PRUEBAS"
+            printf -- '- Escaneo de secretos: `%s`\n' "$SECRETOS"
+            if [ "$EVENTO" = pull_request ] && [ "$RAMA_BASE" = dev ]; then
+              echo '- Las pruebas se omiten en PR hacia dev; ejecútalas en local.'
+            fi
+            echo '- Cada trabajo de la matriz muestra el resultado de su proyecto.'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Verificar el resultado
+        env:
+          CAMBIOS: ${{ needs.cambios.result }}
+          PRUEBAS: ${{ needs.pruebas.result }}
+          SECRETOS: ${{ needs.secretos.result }}
+          PROYECTOS: ${{ needs.cambios.outputs.proyectos }}
+          EVENTO: ${{ github.event_name }}
+          RAMA_BASE: ${{ github.base_ref }}
+        run: |
+          test "$SECRETOS" = success
+          test "$CAMBIOS" = success
+          test -n "$PROYECTOS"
+          if { [ "$EVENTO" = pull_request ] && [ "$RAMA_BASE" = dev ]; } || [ "$PROYECTOS" = '[]' ]; then
+            test "$PRUEBAS" = skipped
+          else
+            test "$PRUEBAS" = success
+          fi
