@@ -22,7 +22,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}-${{ inputs.servicio || 'auto' }}
   cancel-in-progress: true
 
 jobs:
