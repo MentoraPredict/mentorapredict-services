@@ -27,9 +27,64 @@ including shared libraries; other changes test only selected services. If no
 services are selected, both tests and builds are skipped. Images are built
 for `linux/amd64` (ECS `X86_64`); each image that passes the security scan is
 uploaded as an OCI archive named `image-<service>-<commit SHA>`, retained for
-one day. This is a temporary handoff for later CI stages; it is not a published
-ECR image or a signature. Before those stages are connected, their handling of
-the OCI archive and image digest must be verified together.
+one day. On an authorized push or manual run on `qa`, a separate job downloads
+this archive and its scan identity, checks both, and publishes to the existing
+ECR repository named after the service. It requires immutable tags and uses
+`sha-<7 characters>`; an existing tag is accepted only if it already points
+to the same digest. The copy must preserve the scanned build's digest, which
+is then checked in ECR. Image signing is tracked separately in MPC-180; a
+published image is not automatically signed.
+
+### QA publication configuration
+
+Create separate GitHub environments named `qa` and `production`. Store each
+environment's AWS secrets and variables in that environment, and configure its
+branch or tag restrictions according to the repository's release policy. Do not
+put production credentials in `qa` or use repository-level AWS secrets as a
+substitute for environment isolation. Availability of environment restrictions
+and approvals depends on the GitHub plan and repository visibility.
+
+The publication workflows implemented here explicitly reference `qa`; they do
+not publish to `production`. Creating the production environment and storing
+its credentials does not by itself enable production publication. A separate
+production workflow must explicitly reference `production` before it can use
+those credentials.
+
+Configure the GitHub environment `qa` with three sets of temporary lab secrets:
+`A_AWS_ACCESS_KEY_ID`, `A_AWS_SECRET_ACCESS_KEY`, `A_AWS_SESSION_TOKEN`, and
+the equivalent names beginning `B_` and `C_`. Configure variables
+`A_AWS_REGION`, `A_AWS_ACCOUNT_ID`, and the corresponding `B_` and `C_` names.
+Restrict the environment to the authorized `qa` branch and update each set
+when its session changes or expires. Never commit or log credential values.
+These are shared environment secrets available to jobs referencing `qa`;
+repository administrators must restrict who can change workflows and run them.
+The publisher confirms the effective account, permits the lab regions
+`us-east-1` and `us-west-2`, and requires an existing immutable ECR repository
+with the same name as the service. Access to ECR and the right to use the lab
+credentials in GitHub Actions still require confirmation in the lab. Automatic
+publication tries A, then B, then C until one succeeds; each failure is reported
+in the job log. If all attempts fail, the job fails. A failed copy can have
+already uploaded blobs or a manifest before failing verification; retrying the
+same immutable tag succeeds only when its digest matches.
+
+To retry without rebuilding, open **Actions → Republish a scanned image to ECR →
+Run workflow**, choose the `qa` branch, provide the original build run ID and
+service name, and select A, B, or C. The workflow verifies that the original
+run belongs to `build-images.yml`, ran on `qa`, and that the service's build
+job completed successfully, then downloads its image and scan identity and
+checks the digests again. It can recover the image only while the original
+one-day artifact is retained; otherwise run a new build and scan. GitHub makes
+manual workflows available only when the workflow file exists on the default
+branch. Each target account needs its own existing ECR repository and permission
+to push.
+
+The `publication-<service>-<commit SHA>` artifact contains the commit, tag,
+region, selected account label, ECR image digest and scanned manifest digest,
+without the account ID.
+The ECS deployment can reconstruct the image URI using its own configured
+account and the recorded digest. Non-`qa` manual runs build and scan but do
+not publish. ECR images use only the immutable commit SHA tag; GitHub Releases
+maintains its version tags separately and runs independently.
 
 ## Security scan
 

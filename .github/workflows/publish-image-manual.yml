@@ -1,0 +1,107 @@
+name: Republish a scanned image to ECR
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: ID of the original Build service images run
+        required: true
+        type: string
+      service:
+        description: Service name, for example identity-service
+        required: true
+        type: string
+      account:
+        description: AWS lab account to use
+        required: true
+        type: choice
+        options: [A, B, C]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  republish:
+    if: github.ref == 'refs/heads/qa'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: qa
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify the original build
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ inputs.run_id }}
+          SERVICE: ${{ inputs.service }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$SERVICE" =~ ^[a-z0-9][a-z0-9-]*$ && "$SERVICE" != sample-service ]]
+          workflow_id="$(gh api "repos/$REPO/actions/workflows/build-images.yml" --jq .id)"
+          run="$(gh api "repos/$REPO/actions/runs/$RUN_ID")"
+          jq -e --argjson workflow_id "$workflow_id" \
+            '.workflow_id == $workflow_id and .head_branch == "qa" and .status == "completed" and (.event == "push" or .event == "workflow_dispatch")' <<< "$run" >/dev/null
+          sha="$(jq -er '.head_sha | select(test("^[0-9a-f]{40}$"))' <<< "$run")"
+          attempt="$(jq -er '.run_attempt | select(type == "number")' <<< "$run")"
+          gh api --paginate --slurp "repos/$REPO/actions/runs/$RUN_ID/attempts/$attempt/jobs?per_page=100" \
+            | jq -e --arg name "Build ($SERVICE)" 'any(.[].jobs[]; .name == $name and .conclusion == "success")' >/dev/null
+          printf 'sha=%s\n' "$sha" >> "$GITHUB_OUTPUT"
+      - name: Download scanned OCI archive
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: image-${{ inputs.service }}-${{ steps.source.outputs.sha }}
+          path: ${{ runner.temp }}/scanned-image
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+      - name: Download scan identity
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: scan-${{ inputs.service }}-${{ steps.source.outputs.sha }}
+          path: ${{ runner.temp }}/scan-identity
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+      - name: Install image copy tool
+        run: |
+          if ! command -v skopeo >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y skopeo
+          fi
+      - name: Publish the verified image
+        env:
+          A_AWS_ACCESS_KEY_ID: ${{ secrets.A_AWS_ACCESS_KEY_ID }}
+          A_AWS_SECRET_ACCESS_KEY: ${{ secrets.A_AWS_SECRET_ACCESS_KEY }}
+          A_AWS_SESSION_TOKEN: ${{ secrets.A_AWS_SESSION_TOKEN }}
+          A_AWS_REGION: ${{ vars.A_AWS_REGION }}
+          A_AWS_ACCOUNT_ID: ${{ vars.A_AWS_ACCOUNT_ID }}
+          B_AWS_ACCESS_KEY_ID: ${{ secrets.B_AWS_ACCESS_KEY_ID }}
+          B_AWS_SECRET_ACCESS_KEY: ${{ secrets.B_AWS_SECRET_ACCESS_KEY }}
+          B_AWS_SESSION_TOKEN: ${{ secrets.B_AWS_SESSION_TOKEN }}
+          B_AWS_REGION: ${{ vars.B_AWS_REGION }}
+          B_AWS_ACCOUNT_ID: ${{ vars.B_AWS_ACCOUNT_ID }}
+          C_AWS_ACCESS_KEY_ID: ${{ secrets.C_AWS_ACCESS_KEY_ID }}
+          C_AWS_SECRET_ACCESS_KEY: ${{ secrets.C_AWS_SECRET_ACCESS_KEY }}
+          C_AWS_SESSION_TOKEN: ${{ secrets.C_AWS_SESSION_TOKEN }}
+          C_AWS_REGION: ${{ vars.C_AWS_REGION }}
+          C_AWS_ACCOUNT_ID: ${{ vars.C_AWS_ACCOUNT_ID }}
+          SERVICE: ${{ inputs.service }}
+          ACCOUNT: ${{ inputs.account }}
+          COMMIT: ${{ steps.source.outputs.sha }}
+        run: |
+          python3 .github/scripts/publish-ecr-accounts.py \
+            --archive "$RUNNER_TEMP/scanned-image/$SERVICE.tar" \
+            --identity "$RUNNER_TEMP/scan-identity/image-identity.txt" \
+            --service "$SERVICE" --commit "$COMMIT" --account "$ACCOUNT" \
+            --evidence "$RUNNER_TEMP/publication/image.json"
+      - name: Keep publication evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: publication-${{ inputs.service }}-${{ steps.source.outputs.sha }}-${{ inputs.account }}
+          path: ${{ runner.temp }}/publication/image.json
+          if-no-files-found: error
+          retention-days: 14

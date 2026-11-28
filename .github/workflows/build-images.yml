@@ -122,10 +122,78 @@ jobs:
           retention-days: 1
           compression-level: 0
 
+  publish:
+    name: Publish (${{ matrix.service }})
+    needs: [changes, tests, build]
+    if: >-
+      needs.build.result == 'success' &&
+      needs.changes.outputs.services != '[]' &&
+      github.ref == 'refs/heads/qa' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.changes.outputs.services) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: qa
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download scanned OCI archive
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: image-${{ matrix.service }}-${{ github.sha }}
+          path: ${{ runner.temp }}/scanned-image
+      - name: Download scan identity
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: scan-${{ matrix.service }}-${{ github.sha }}
+          path: ${{ runner.temp }}/scan-identity
+      - name: Install image copy tool
+        run: |
+          if ! command -v skopeo >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y skopeo
+          fi
+      - name: Publish the verified image to ECR
+        env:
+          A_AWS_ACCESS_KEY_ID: ${{ secrets.A_AWS_ACCESS_KEY_ID }}
+          A_AWS_SECRET_ACCESS_KEY: ${{ secrets.A_AWS_SECRET_ACCESS_KEY }}
+          A_AWS_SESSION_TOKEN: ${{ secrets.A_AWS_SESSION_TOKEN }}
+          A_AWS_REGION: ${{ vars.A_AWS_REGION }}
+          A_AWS_ACCOUNT_ID: ${{ vars.A_AWS_ACCOUNT_ID }}
+          B_AWS_ACCESS_KEY_ID: ${{ secrets.B_AWS_ACCESS_KEY_ID }}
+          B_AWS_SECRET_ACCESS_KEY: ${{ secrets.B_AWS_SECRET_ACCESS_KEY }}
+          B_AWS_SESSION_TOKEN: ${{ secrets.B_AWS_SESSION_TOKEN }}
+          B_AWS_REGION: ${{ vars.B_AWS_REGION }}
+          B_AWS_ACCOUNT_ID: ${{ vars.B_AWS_ACCOUNT_ID }}
+          C_AWS_ACCESS_KEY_ID: ${{ secrets.C_AWS_ACCESS_KEY_ID }}
+          C_AWS_SECRET_ACCESS_KEY: ${{ secrets.C_AWS_SECRET_ACCESS_KEY }}
+          C_AWS_SESSION_TOKEN: ${{ secrets.C_AWS_SESSION_TOKEN }}
+          C_AWS_REGION: ${{ vars.C_AWS_REGION }}
+          C_AWS_ACCOUNT_ID: ${{ vars.C_AWS_ACCOUNT_ID }}
+          SERVICE: ${{ matrix.service }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          python3 .github/scripts/publish-ecr-accounts.py \
+            --archive "$RUNNER_TEMP/scanned-image/$SERVICE.tar" \
+            --identity "$RUNNER_TEMP/scan-identity/image-identity.txt" \
+            --service "$SERVICE" --commit "$COMMIT" \
+            --account AUTO --evidence "$RUNNER_TEMP/publication/image.json"
+      - name: Keep publication evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: publication-${{ matrix.service }}-${{ github.sha }}
+          path: ${{ runner.temp }}/publication/image.json
+          if-no-files-found: error
+          retention-days: 14
+
   result:
     name: Image build result
     if: always()
-    needs: [changes, tests, build]
+    needs: [changes, tests, build, publish]
     runs-on: ubuntu-latest
     steps:
       - name: Verify selection and image builds
@@ -133,6 +201,9 @@ jobs:
           CHANGES: ${{ needs.changes.result }}
           TESTS: ${{ needs.tests.result }}
           BUILD: ${{ needs.build.result }}
+          PUBLISH: ${{ needs.publish.result }}
+          REF: ${{ github.ref }}
+          EVENT: ${{ github.event_name }}
           SERVICES: ${{ needs.changes.outputs.services }}
           TEST_TARGETS: ${{ needs.changes.outputs.test_targets }}
           MISSING: ${{ needs.changes.outputs.missing }}
@@ -142,6 +213,7 @@ jobs:
             printf -- '- Selection: `%s`\n' "$CHANGES"
             printf -- '- Tests: `%s`\n' "$TESTS"
             printf -- '- Build: `%s`\n' "$BUILD"
+            printf -- '- Publication: `%s`\n' "$PUBLISH"
             printf -- '- Missing Dockerfiles: `%s`\n' "${MISSING:-unavailable}"
           } >> "$GITHUB_STEP_SUMMARY"
           test "$CHANGES" = success
@@ -160,4 +232,9 @@ jobs:
             test "$BUILD" = skipped
           else
             test "$BUILD" = success
+          fi
+          if [ "$SERVICES" != '[]' ] && [ "$REF" = 'refs/heads/qa' ] && { [ "$EVENT" = push ] || [ "$EVENT" = workflow_dispatch ]; }; then
+            test "$PUBLISH" = success
+          else
+            test "$PUBLISH" = skipped
           fi
