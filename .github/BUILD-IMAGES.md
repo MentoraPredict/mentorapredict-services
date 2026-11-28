@@ -5,6 +5,25 @@ to shared Gradle configuration, libraries, or the workflow selects all Gradle
 services. `sample-service` is excluded. Manual and reusable invocations accept
 a service directory such as `identity-service` or `ALL-SERVICES`.
 
+To run checks manually, open **Actions > CI > Run workflow**, select the branch,
+and enter a service name or `ALL-SERVICES`. To build and scan an image manually,
+use **Actions > Build service images > Run workflow** with the same selection.
+Publication is attempted only when the selected branch is `qa`.
+
+Another workflow in this repository can call the reusable CI job:
+
+```yaml
+jobs:
+  validate:
+    uses: ./.github/workflows/ci.yml
+    with:
+      servicio: identity-service
+```
+
+Use `ALL-SERVICES` to check every supported service except `sample-service`.
+The image workflow can also be called as a reusable job with
+`uses: ./.github/workflows/build-images.yml` and the same `servicio` input.
+
 Each service owns `services/<service>/Dockerfile`. The build context is the
 repository root, so the Dockerfile and its `Dockerfile.dockerignore` should
 reflect the files it needs. `compose.yml` remains the local orchestration
@@ -22,7 +41,9 @@ digest, so their updates must be made explicitly.
 The workflow reports selected services without a Dockerfile in the summary
 and as a warning, but their absence does not fail the workflow. Services that
 do have a Dockerfile are built only after the reusable CI workflow succeeds
-for all selected services on the same commit. Shared changes run the full CI
+for all selected services on the same commit. Tests and image builds can run
+in parallel across services, but publication waits for the entire build and
+scan job to succeed. Shared changes run the full CI
 including shared libraries; other changes test only selected services. If no
 services are selected, both tests and builds are skipped. Images are built
 for `linux/amd64` (ECS `X86_64`); each image that passes the security scan is
@@ -66,6 +87,10 @@ publication tries A, then B, then C until one succeeds; each failure is reported
 in the job log. If all attempts fail, the job fails. A failed copy can have
 already uploaded blobs or a manifest before failing verification; retrying the
 same immutable tag succeeds only when its digest matches.
+
+Publication and manual recovery have been tested locally with mocked AWS
+responses; execution against GitHub Actions and real ECR accounts still needs
+verification. Promotion of the same digest to production is not implemented.
 
 To retry without rebuilding, open **Actions → Republish a scanned image to ECR →
 Run workflow**, choose the `qa` branch, provide the original build run ID and
