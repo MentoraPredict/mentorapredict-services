@@ -35,6 +35,8 @@ fi
 # Highest change since the last stable tag: 0 none, 1 patch, 2 minor, 3 major.
 rank=0
 while IFS= read -r -d '' commit; do
+  # git log writes a newline between entries, so every message but the first starts with one.
+  commit=${commit#$'\n'}
   header=${commit%%$'\n'*}
   if [[ ! "$header" =~ ^([a-z]+)(\([^\)]*\))?(!)?:\  ]]; then
     continue
@@ -83,6 +85,12 @@ else
 fi
 
 if [[ "$prerelease" == true ]]; then
+  # Running the workflow again must not publish a second candidate for the same commit.
+  existing=$(git tag --points-at HEAD --list "v${next}-rc.*" | head -n 1)
+  if [[ -n "$existing" ]]; then
+    echo "This commit is already published as ${existing}. No tag created."
+    exit 0
+  fi
   count=$(git tag --list "v${next}-rc.*" | wc -l | tr -d ' ')
   tag="v${next}-rc.$((count + 1))"
 else
