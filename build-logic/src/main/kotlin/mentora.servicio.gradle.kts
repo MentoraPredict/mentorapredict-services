@@ -21,6 +21,20 @@ dependencies {
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
+// Downloads what bootJar needs without compiling the service. The Dockerfile runs it before
+// copying the sources, so Docker keeps the dependencies in a cached layer.
+tasks.register("downloadDependencies") {
+    description = "Downloads the dependencies needed to build the executable jar."
+    val classpaths =
+        listOf("annotationProcessor", "compileClasspath", "runtimeClasspath").map { name ->
+            configurations[name].incoming.artifactView {
+                // Project dependencies are excluded: their jars would need the sources.
+                componentFilter { it is ModuleComponentIdentifier }
+            }.files
+        }
+    doLast { classpaths.forEach { it.files } }
+}
+
 // Integration tests live in src/integrationTest and run with ./gradlew integrationTest.
 // They talk to real PostgreSQL and Kafka through Testcontainers (DOC-ARQ-13 section 6), so they
 // need Docker and are not part of `check`: a clone with only JDK 21 still builds and tests.
