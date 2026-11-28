@@ -97,10 +97,31 @@ jobs:
             echo '- Los reportes disponibles se guardan como artefacto si el trabajo falla.'
           } >> "$GITHUB_STEP_SUMMARY"
 
+  secretos:
+    name: Escaneo de secretos
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Comprobar que los controles bloquean
+        run: python3 .github/scripts/scan-security.py selftest
+      - name: Buscar secretos en el repositorio
+        run: python3 .github/scripts/scan-security.py repo --reports "$RUNNER_TEMP/reportes-secretos"
+      - name: Guardar el reporte de secretos
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: reporte-secretos-${{ inputs.servicio || 'auto' }}
+          path: ${{ runner.temp }}/reportes-secretos
+          if-no-files-found: warn
+          retention-days: 7
+
   resultado:
     name: Resultado de CI
     if: always()
-    needs: [cambios, pruebas]
+    needs: [cambios, pruebas, secretos]
     runs-on: ubuntu-latest
     steps:
       - name: Resumir los proyectos seleccionados
@@ -108,18 +129,22 @@ jobs:
           PROYECTOS: ${{ needs.cambios.outputs.proyectos }}
           CAMBIOS: ${{ needs.cambios.result }}
           PRUEBAS: ${{ needs.pruebas.result }}
+          SECRETOS: ${{ needs.secretos.result }}
         run: |
           {
             echo '## Resumen de CI'
             printf -- '- Proyectos seleccionados: `%s`\n' "${PROYECTOS:-no disponibles}"
             printf -- '- Detección de cambios: `%s`\n' "$CAMBIOS"
             printf -- '- Resultado global de pruebas: `%s`\n' "$PRUEBAS"
+            printf -- '- Escaneo de secretos: `%s`\n' "$SECRETOS"
             echo '- Cada trabajo de la matriz muestra el resultado de su proyecto.'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Verificar el resultado
         env:
           CAMBIOS: ${{ needs.cambios.result }}
           PRUEBAS: ${{ needs.pruebas.result }}
+          SECRETOS: ${{ needs.secretos.result }}
         run: |
+          test "$SECRETOS" = success
           test "$CAMBIOS" = success
           test "$PRUEBAS" = success || test "$PRUEBAS" = skipped
