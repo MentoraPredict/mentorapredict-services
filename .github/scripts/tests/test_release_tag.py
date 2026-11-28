@@ -9,8 +9,22 @@ import unittest
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "release-tag.sh"
-# On Windows a bare "bash" can resolve to WSL; shutil.which follows PATH.
-BASH = shutil.which("bash")
+
+
+def find_bash():
+    if os.name != "nt":
+        return shutil.which("bash")
+    # In PowerShell the first "bash" in PATH is the WSL launcher, so use the one shipped with Git.
+    git = shutil.which("git")
+    if git:
+        for folder in Path(git).resolve().parents[:3]:
+            candidate = folder / "bin" / "bash.exe"
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+
+BASH = find_bash()
 
 
 @unittest.skipUnless(BASH, "bash is required")
