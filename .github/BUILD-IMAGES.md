@@ -5,6 +5,12 @@ to shared Gradle configuration, libraries, or the workflow selects all Gradle
 services. `sample-service` is excluded. Manual and reusable invocations accept
 a service directory such as `identity-service` or `ALL-SERVICES`.
 
+Pull requests targeting `dev` run change detection and the repository secret
+scan but skip Gradle compilation and tests; developers should run their service
+checks locally. Pull requests targeting `qa` or `main`, manual CI runs, and
+reusable CI calls still compile and test the selected services. A shared change
+selects `ALL-SERVICES`; otherwise, only affected service directories are selected.
+
 To run checks manually, open **Actions > CI > Run workflow**, select the branch,
 and enter a service name or `ALL-SERVICES`. To build and scan an image manually,
 use **Actions > Build service images > Run workflow** with the same selection.

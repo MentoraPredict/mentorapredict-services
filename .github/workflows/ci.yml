@@ -47,7 +47,9 @@ jobs:
   pruebas:
     name: Pruebas (${{ matrix.proyecto }})
     needs: cambios
-    if: needs.cambios.outputs.proyectos != '[]'
+    if: >-
+      needs.cambios.outputs.proyectos != '[]' &&
+      (github.event_name != 'pull_request' || github.base_ref != 'dev')
     strategy:
       fail-fast: false
       matrix:
@@ -130,6 +132,8 @@ jobs:
           CAMBIOS: ${{ needs.cambios.result }}
           PRUEBAS: ${{ needs.pruebas.result }}
           SECRETOS: ${{ needs.secretos.result }}
+          EVENTO: ${{ github.event_name }}
+          RAMA_BASE: ${{ github.base_ref }}
         run: |
           {
             echo '## Resumen de CI'
@@ -137,6 +141,9 @@ jobs:
             printf -- '- Detección de cambios: `%s`\n' "$CAMBIOS"
             printf -- '- Resultado global de pruebas: `%s`\n' "$PRUEBAS"
             printf -- '- Escaneo de secretos: `%s`\n' "$SECRETOS"
+            if [ "$EVENTO" = pull_request ] && [ "$RAMA_BASE" = dev ]; then
+              echo '- Las pruebas se omiten en PR hacia dev; ejecútalas en local.'
+            fi
             echo '- Cada trabajo de la matriz muestra el resultado de su proyecto.'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Verificar el resultado
@@ -144,7 +151,15 @@ jobs:
           CAMBIOS: ${{ needs.cambios.result }}
           PRUEBAS: ${{ needs.pruebas.result }}
           SECRETOS: ${{ needs.secretos.result }}
+          PROYECTOS: ${{ needs.cambios.outputs.proyectos }}
+          EVENTO: ${{ github.event_name }}
+          RAMA_BASE: ${{ github.base_ref }}
         run: |
           test "$SECRETOS" = success
           test "$CAMBIOS" = success
-          test "$PRUEBAS" = success || test "$PRUEBAS" = skipped
+          test -n "$PROYECTOS"
+          if { [ "$EVENTO" = pull_request ] && [ "$RAMA_BASE" = dev ]; } || [ "$PROYECTOS" = '[]' ]; then
+            test "$PRUEBAS" = skipped
+          else
+            test "$PRUEBAS" = success
+          fi
